@@ -8,7 +8,7 @@
 
 #include "database.hpp"
 
-#include "/usr/local/opt/curl/include/curl/curl.h"
+#include <curl/curl.h>
 
 namespace neo4jDriver
 {
@@ -27,7 +27,7 @@ namespace neo4jDriver
     {
         if (Neo4j::neo4j == nullptr)
         {
-            Neo4j::neo4j = std::shared_ptr<Neo4j>(new Neo4j::Neo4j());
+            Neo4j::neo4j = std::shared_ptr<Neo4j>(new Neo4j());
         }
         
         return Neo4j::neo4j;

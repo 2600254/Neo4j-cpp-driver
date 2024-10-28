@@ -980,7 +980,7 @@ namespace neo4jDriver
     {
         std::string cypher = "START data=node({_id}) SET " + Kit::getSetString("data", properties) + " RETURN data";
         
-        properties["_id"] = nodeID;
+        properties["_id"] = (uint64_t)nodeID;
         
         //解析过程是否发生异常严重依赖返回的数据，该怎么看待和处理？
         Json::Value result = this->cypherQuery(cypher, properties);
@@ -1337,8 +1337,8 @@ namespace neo4jDriver
                     relationship = responseJson["data"];
                     relationship["_id"] = metaData["id"];
                     relationship["_type"] = metaData["type"];
-                    relationship["_start"] = Kit::getNodeOrRelationshipID(responseJson["start"].asString());
-                    relationship["_end"] = Kit::getNodeOrRelationshipID(responseJson["end"].asString());
+                    relationship["_start"] = (uint64_t)Kit::getNodeOrRelationshipID(responseJson["start"].asString());
+                    relationship["_end"] = (uint64_t)Kit::getNodeOrRelationshipID(responseJson["end"].asString());
                     
                     return true;
                 }
@@ -1429,8 +1429,8 @@ namespace neo4jDriver
                         relationship = relationshipInfo["data"];
                         relationship["_id"] = metadata["id"];
                         relationship["_type"] = metadata["type"];
-                        relationship["_start"] = Kit::getNodeOrRelationshipID(relationshipInfo["start"].asString());
-                        relationship["_end"] = Kit::getNodeOrRelationshipID(relationshipInfo["end"].asString());
+                        relationship["_start"] = (uint64_t)Kit::getNodeOrRelationshipID(relationshipInfo["start"].asString());
+                        relationship["_end"] = (uint64_t)Kit::getNodeOrRelationshipID(relationshipInfo["end"].asString());
                         
                         relationshipList.append(relationship);
                     }
