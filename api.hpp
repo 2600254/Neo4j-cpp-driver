@@ -9,6 +9,7 @@
 #ifndef api_hpp
 #define api_hpp
 
+#include <atomic>
 #include <string>
 #include <vector>
 
@@ -19,6 +20,24 @@
 
 namespace neo4jDriver
 {
+
+    class autocurl
+    {
+    public:
+        autocurl(CURL *curl,std::atomic<bool>* status,int idx):curl(curl),status(status),idx(idx){}
+        ~autocurl()
+        {
+            status->store(false);
+        }
+        operator CURL*() const {
+            return curl;
+        }
+        int idx;
+        private:
+        CURL *curl;
+        std::atomic<bool>* status;
+    };
+
     class Neo4jAPI
     {
     public:
@@ -31,7 +50,7 @@ namespace neo4jDriver
         Neo4jAPI(std::shared_ptr<neo4jDriver::Neo4j> database);
         
         //构造方法
-        Neo4jAPI(std::shared_ptr<neo4jDriver::Neo4j> database, std::string host, std::string port, std::string user, std::string password);
+        Neo4jAPI(std::shared_ptr<neo4jDriver::Neo4j> database, std::string host, std::string port, std::string user, std::string password, int threads = 1);
         
         /****************/
         /*  基本信息及操作 */
@@ -194,10 +213,12 @@ namespace neo4jDriver
     private:
         std::shared_ptr<neo4jDriver::Neo4j> database;
         std::string host, port, user, password;
-        CURL* curl;
+        std::vector<CURL*> curl;
+        std::vector<std::atomic<bool>*> curlStatus;
         struct curl_slist* headers;
-        std::string responseString;
-        std::string responseHeaderString;
+        std::vector<std::string> responseString;
+        std::vector<std::string> responseHeaderString;
+        int threads;
         
         /*
          * 对HTTP协议返回的协议头进行处理的回调方法
@@ -208,6 +229,8 @@ namespace neo4jDriver
          * 对HTTP协议返回的数据进行处理的回调方法
          */
         static size_t responseHandeler(char *ptr, size_t size, size_t nmemb, void *userdata);
+
+        autocurl getCurl();
     };
 }
 

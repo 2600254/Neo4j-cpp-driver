@@ -17,13 +17,13 @@
 namespace neo4jDriver
 {
     Neo4jAPI::Neo4jAPI(std::shared_ptr<neo4jDriver::Neo4j> database)
-    :database(database), headers(NULL), curl(NULL), responseHeaderString(""), responseString("")
+    :database(database), headers(NULL), curl(), responseHeaderString(), responseString()
     {
         
     };
     
-    Neo4jAPI::Neo4jAPI(std::shared_ptr<neo4jDriver::Neo4j> database, std::string host, std::string port, std::string user, std::string password)
-    :database(database), host(host), port(port), user(user), password(password), headers(NULL), curl(NULL), responseHeaderString(""), responseString("")
+    Neo4jAPI::Neo4jAPI(std::shared_ptr<neo4jDriver::Neo4j> database, std::string host, std::string port, std::string user, std::string password, int threads)
+    :database(database), host(host), port(port), user(user), password(password), headers(NULL), curl(), responseHeaderString(), responseString(), threads(threads)
     {
         
     };
@@ -59,59 +59,71 @@ namespace neo4jDriver
         userAndPasswordEncodeString = "Authorization: Basic " + userAndPasswordEncodeString;
         this->headers = curl_slist_append(this->headers, userAndPasswordEncodeString.c_str());
         
-        this->curl = curl_easy_init();
-        
-        if (this->curl)
+        curl.resize(this->threads);
+        curlStatus.resize(this->threads);
+        responseHeaderString.resize(this->threads);
+        responseString.resize(this->threads);
+        for(auto &i:curlStatus)
+            i=new std::atomic<bool>(false);
+
+        for(int i=0;i<curl.size();++i)
         {
-            //指定header
-            curl_easy_setopt(this->curl, CURLOPT_HTTPHEADER, this->headers);
-            //指定接收返回协议头的回调方法
-            curl_easy_setopt(this->curl, CURLOPT_HEADERFUNCTION, Neo4jAPI::responseHeaderHandeler);
-            //指定接收返回协议头的存储位置
-            curl_easy_setopt(this->curl, CURLOPT_HEADERDATA, &this->responseHeaderString);
-            //指定接收数据的回调方法
-            curl_easy_setopt(this->curl, CURLOPT_WRITEFUNCTION, Neo4jAPI::responseHandeler);
-            //指定接收数据的存储位置
-            curl_easy_setopt(this->curl, CURLOPT_WRITEDATA, &this->responseString);
+            curl[i] = curl_easy_init();
             
-            //发送请求，测试数据库是否已连接成功
-            std::string httpUrlForTransaction = "http://" + host + ":" + port + "/user/neo4j";
-            //指定访问点
-            curl_easy_setopt(this->curl, CURLOPT_URL, httpUrlForTransaction.c_str());
-            //执行POST请求
-            CURLcode res = curl_easy_perform(curl);
-            //根据执行结果返回执行结果或抛出异常
-            if (res != 0)
+            if (curl[i])
             {
-                //post请求执行失败，抛出异常
-                throw "POST REQUEST EXECUTION IS FAILED!";
-            }
-            
-            //对返回数据的协议状态进行检查
-            std::string statusCode = Kit::getStatusCode(this->responseHeaderString);
-            
-            if (statusCode != "200")
-            {
-                this->responseHeaderString = "";
-                this->responseString = "";
+                //指定header
+                curl_easy_setopt(curl[i], CURLOPT_HTTPHEADER, this->headers);
+                //指定接收返回协议头的回调方法
+                curl_easy_setopt(curl[i], CURLOPT_HEADERFUNCTION, Neo4jAPI::responseHeaderHandeler);
+                //指定接收返回协议头的存储位置
+                curl_easy_setopt(curl[i], CURLOPT_HEADERDATA, &this->responseHeaderString[i]);
+                //指定接收数据的回调方法
+                curl_easy_setopt(curl[i], CURLOPT_WRITEFUNCTION, Neo4jAPI::responseHandeler);
+                //指定接收数据的存储位置
+                curl_easy_setopt(curl[i], CURLOPT_WRITEDATA, &this->responseString[i]);
                 
-                throw "RESPONSE STATUS IS NOT 200!";
+                //发送请求，测试数据库是否已连接成功
+                std::string httpUrlForTransaction = "http://" + host + ":" + port + "/user/neo4j";
+                //指定访问点
+                curl_easy_setopt(curl[i], CURLOPT_URL, httpUrlForTransaction.c_str());
+                //执行POST请求
+                CURLcode res = curl_easy_perform(curl[i]);
+                //根据执行结果返回执行结果或抛出异常
+                if (res != 0)
+                {
+                    //post请求执行失败，抛出异常
+                    throw "POST REQUEST EXECUTION IS FAILED!";
+                }
+                
+                //对返回数据的协议状态进行检查
+                std::string statusCode = Kit::getStatusCode(this->responseHeaderString[i]);
+                
+                if (statusCode != "200")
+                {
+                    this->responseHeaderString[i] = "";
+                    this->responseString[i] = "";
+                    
+                    throw "RESPONSE STATUS IS NOT 200!";
+                }
+                
+                this->responseHeaderString[i] = "";
+                this->responseString[i] = "";
             }
-            
-            this->responseHeaderString = "";
-            this->responseString = "";
-        }
-        else
-        {
-            //curl_easy初始化失败，抛出异常
-            throw "CURL EASY INIT IS FAILED!";
+            else
+            {
+                //curl_easy初始化失败，抛出异常
+                throw "CURL EASY INIT IS FAILED!";
+            }
         }
     };
     
     void Neo4jAPI::closeDatabase()
     {
-        this->responseHeaderString = "";
-        this->responseString = "";
+        for(auto &i:this->responseHeaderString)
+            i = "";
+        for(auto &i:this->responseString)
+            i = "";
         
         if (this->headers != NULL)
         {
@@ -119,21 +131,29 @@ namespace neo4jDriver
             this->headers = NULL;
         }
         
-        if (this->curl)
-        {
-            curl_easy_cleanup(this->curl);
-            this->curl = NULL;
-        }
+        for (auto &i:this->curl)
+            if(i!=NULL)
+            {
+                curl_easy_cleanup(i);
+                i = NULL;
+            }
+        for(auto &i:curlStatus)
+            if (i!=NULL)
+            {
+                delete i;
+                i = NULL;
+            }
     };
     
     Json::Value Neo4jAPI::cypherQuery(std::string cypher, Json::Value properties)
     {
-        if (this->curl)
+        auto curl = this->getCurl();
+        if ((CURL*)curl)
         {
             std::string httpUrlForTransaction = "http://" + host + ":" + port + "/db/data/transaction/commit";
             
             //指定访问点
-            curl_easy_setopt(this->curl, CURLOPT_URL, httpUrlForTransaction.c_str());
+            curl_easy_setopt(curl, CURLOPT_URL, httpUrlForTransaction.c_str());
             
             //通过Json构建Cypher语句的查询字符串
             Json::Value statement;
@@ -158,10 +178,10 @@ namespace neo4jDriver
             std::string cypherString = writer.write(cypherJson);
             
             //指定请求方式为POST
-            curl_easy_setopt(this->curl, CURLOPT_POST, 1);
+            curl_easy_setopt(curl, CURLOPT_POST, 1);
             //将Cypher语句填充至POST的数据段中
-            curl_easy_setopt(this->curl, CURLOPT_POSTFIELDS, cypherString.c_str());
-            curl_easy_setopt(this->curl, CURLOPT_CUSTOMREQUEST, "POST");
+            curl_easy_setopt(curl, CURLOPT_POSTFIELDS, cypherString.c_str());
+            curl_easy_setopt(curl, CURLOPT_CUSTOMREQUEST, "POST");
             
             //执行POST请求
             CURLcode res = curl_easy_perform(curl);
@@ -175,12 +195,12 @@ namespace neo4jDriver
             else
             {
                 //对返回数据的协议状态进行检查
-                std::string statusCode = Kit::getStatusCode(this->responseHeaderString);
+                std::string statusCode = Kit::getStatusCode(this->responseHeaderString[curl.idx]);
                 
                 if (statusCode != "200")
                 {
-                    this->responseHeaderString = "";
-                    this->responseString = "";
+                    this->responseHeaderString[curl.idx] = "";
+                    this->responseString[curl.idx] = "";
                     
                     throw "RESPONSE STATUS IS NOT 200!";
                 }
@@ -193,10 +213,10 @@ namespace neo4jDriver
                 Json::Reader reader;
                 
                 //将返回字符串解析为Json对象
-                if (reader.parse(this->responseString, responseJson))
+                if (reader.parse(this->responseString[curl.idx], responseJson))
                 {
-                    this->responseHeaderString = "";
-                    this->responseString = "";
+                    this->responseHeaderString[curl.idx] = "";
+                    this->responseString[curl.idx] = "";
                     
                     //取出其中的错误部分
                     errors = responseJson["errors"];
@@ -227,8 +247,8 @@ namespace neo4jDriver
                 }
                 else
                 {
-                    this->responseHeaderString = "";
-                    this->responseString = "";
+                    this->responseHeaderString[curl.idx] = "";
+                    this->responseString[curl.idx] = "";
                     
                     //解析失败，抛出异常
                     throw "RESPONSE FORMAT IS ERROR!";
@@ -243,12 +263,13 @@ namespace neo4jDriver
     
     Json::Value Neo4jAPI::createNode(const Json::Value &properties, const std::string &label)
     {
-        if (this->curl)
+        auto curl = this->getCurl();
+        if ((CURL*)curl)
         {
             std::string httpUrlForTransaction = "http://" + this->host + ":" + this->port + "/db/data/transaction/commit";
             
             //指定访问点
-            curl_easy_setopt(this->curl, CURLOPT_URL, httpUrlForTransaction.c_str());
+            curl_easy_setopt(curl, CURLOPT_URL, httpUrlForTransaction.c_str());
             
             //通过Json构建Cypher语句的查询字符串
             Json::Value statement;
@@ -294,12 +315,12 @@ namespace neo4jDriver
             cypherString = writer.write(cypherJson);
             
             //指定请求方式为POST
-            curl_easy_setopt(this->curl, CURLOPT_POST, 1);
+            curl_easy_setopt(curl, CURLOPT_POST, 1);
             //将Cypher语句填充至POST的数据段中
             curl_easy_setopt(curl, CURLOPT_POSTFIELDS, cypherString.c_str());
             
             //执行POST请求
-            CURLcode res = curl_easy_perform(this->curl);
+            CURLcode res = curl_easy_perform(curl);
             
             //根据执行结果返回执行结果或抛出异常
             if (res != 0)
@@ -310,12 +331,12 @@ namespace neo4jDriver
             else
             {
                 //对返回数据的协议状态进行检查
-                std::string statusCode = Kit::getStatusCode(this->responseHeaderString);
+                std::string statusCode = Kit::getStatusCode(this->responseHeaderString[curl.idx]);
                 
                 if (statusCode != "200")
                 {
-                    this->responseHeaderString = "";
-                    this->responseString = "";
+                    this->responseHeaderString[curl.idx] = "";
+                    this->responseString[curl.idx] = "";
                     
                     throw "RESPONSE STATUS IS NOT 200!";
                 }
@@ -328,10 +349,10 @@ namespace neo4jDriver
                 Json::Reader reader;
                 
                 //将返回字符串解析为Json对象
-                if (reader.parse(this->responseString, responseJson))
+                if (reader.parse(this->responseString[curl.idx], responseJson))
                 {
-                    this->responseHeaderString = "";
-                    this->responseString = "";
+                    this->responseHeaderString[curl.idx] = "";
+                    this->responseString[curl.idx] = "";
                     
                     //取出其中的错误部分
                     errors = responseJson["errors"];
@@ -372,8 +393,8 @@ namespace neo4jDriver
                 }
                 else
                 {
-                    this->responseHeaderString = "";
-                    this->responseString = "";
+                    this->responseHeaderString[curl.idx] = "";
+                    this->responseString[curl.idx] = "";
                     
                     //解析失败，抛出异常
                     throw "RESPONSE PARSE IS ERROR!";
@@ -393,7 +414,8 @@ namespace neo4jDriver
     
     bool Neo4jAPI::deleteNode(unsigned long long int nodeID)
     {
-        if (this->curl)
+        auto curl = this->getCurl();
+        if ((CURL*)curl)
         {
             std::stringstream sstream;
             sstream << nodeID;
@@ -404,9 +426,9 @@ namespace neo4jDriver
             std::string httpUrl = "http://" + this->host + ":" + this->port + "/db/data/node/" + nodeIDString;
             
             //指定访问点
-            curl_easy_setopt(this->curl, CURLOPT_URL, httpUrl.c_str());
+            curl_easy_setopt(curl, CURLOPT_URL, httpUrl.c_str());
             //指定请求方式为DELETE
-            curl_easy_setopt(this->curl, CURLOPT_CUSTOMREQUEST, "DELETE");
+            curl_easy_setopt(curl, CURLOPT_CUSTOMREQUEST, "DELETE");
             
             //执行DELETE请求
             CURLcode res = curl_easy_perform(curl);
@@ -420,10 +442,10 @@ namespace neo4jDriver
             else
             {
                 //对返回数据的协议状态进行检查
-                std::string statusCode = Kit::getStatusCode(this->responseHeaderString);
+                std::string statusCode = Kit::getStatusCode(this->responseHeaderString[curl.idx]);
                 
-                this->responseHeaderString = "";
-                this->responseString = "";
+                this->responseHeaderString[curl.idx] = "";
+                this->responseString[curl.idx] = "";
                 
                 /*
                  * 删除成功后的状态码和文档描述不一致
@@ -508,7 +530,8 @@ namespace neo4jDriver
     
     bool Neo4jAPI::getNode(unsigned long long int nodeID, Json::Value &node)
     {
-        if (this->curl)
+        auto curl = this->getCurl();
+        if ((CURL*)curl)
         {
             std::stringstream sstream;
             sstream << nodeID;
@@ -519,12 +542,12 @@ namespace neo4jDriver
             std::string httpUrl = "http://" + this->host + ":" + this->port + "/db/data/node/" + nodeIDString;
             
             //指定访问点
-            curl_easy_setopt(this->curl, CURLOPT_URL, httpUrl.c_str());
+            curl_easy_setopt(curl, CURLOPT_URL, httpUrl.c_str());
             //指定请求方式为GET
-            curl_easy_setopt(this->curl, CURLOPT_CUSTOMREQUEST, "GET");
+            curl_easy_setopt(curl, CURLOPT_CUSTOMREQUEST, "GET");
             
             //执行GET请求
-            CURLcode res = curl_easy_perform(this->curl);
+            CURLcode res = curl_easy_perform(curl);
             
             //根据执行结果返回执行结果或抛出异常
             if (res != 0)
@@ -535,7 +558,7 @@ namespace neo4jDriver
             else
             {
                 //对返回数据的协议状态进行检查
-                std::string statusCode = Kit::getStatusCode(this->responseHeaderString);
+                std::string statusCode = Kit::getStatusCode(this->responseHeaderString[curl.idx]);
                 
                 if (statusCode == "200")
                 {
@@ -544,10 +567,10 @@ namespace neo4jDriver
                     Json::Value responseJson;
                     Json::Value metaData;
                     
-                    reader.parse(this->responseString, responseJson);
+                    reader.parse(this->responseString[curl.idx], responseJson);
                     
-                    this->responseHeaderString = "";
-                    this->responseString = "";
+                    this->responseHeaderString[curl.idx] = "";
+                    this->responseString[curl.idx] = "";
                     
                     metaData = responseJson["metadata"];
                     
@@ -559,16 +582,16 @@ namespace neo4jDriver
                 }
                 else if (statusCode == "404")
                 {
-                    this->responseHeaderString = "";
-                    this->responseString = "";
+                    this->responseHeaderString[curl.idx] = "";
+                    this->responseString[curl.idx] = "";
                     
                     //未找到该点
                     return false;
                 }
                 else
                 {
-                    this->responseHeaderString = "";
-                    this->responseString = "";
+                    this->responseHeaderString[curl.idx] = "";
+                    this->responseString[curl.idx] = "";
                     
                     //解析失败，抛出异常
                     throw "RESPONSE STATUS IS ERROR!";
@@ -583,12 +606,13 @@ namespace neo4jDriver
     
     Json::Value Neo4jAPI::selectNodesByLabelAndProperties(std::string label, Json::Value &properties)
     {
-        if (this->curl)
+        auto curl = this->getCurl();
+        if ((CURL*)curl)
         {
             std::string httpUrlForTransaction = "http://" + this->host + ":" + this->port + "/db/data/transaction/commit";
             
             //指定访问点
-            curl_easy_setopt(this->curl, CURLOPT_URL, httpUrlForTransaction.c_str());
+            curl_easy_setopt(curl, CURLOPT_URL, httpUrlForTransaction.c_str());
             
             //通过Json构建Cypher语句的查询字符串
             Json::Value statement;
@@ -623,10 +647,10 @@ namespace neo4jDriver
             rootString = writer.write(root);
             
             //指定请求方式为POST
-            curl_easy_setopt(this->curl, CURLOPT_POST, 1);
+            curl_easy_setopt(curl, CURLOPT_POST, 1);
             //将Cypher语句填充至POST的数据段中
             curl_easy_setopt(curl, CURLOPT_POSTFIELDS, rootString.c_str());
-            curl_easy_setopt(this->curl, CURLOPT_CUSTOMREQUEST, "POST");
+            curl_easy_setopt(curl, CURLOPT_CUSTOMREQUEST, "POST");
             
             //执行POST请求
             CURLcode res = curl_easy_perform(curl);
@@ -640,12 +664,12 @@ namespace neo4jDriver
             else
             {
                 //对返回数据的协议状态进行检查
-                std::string statusCode = Kit::getStatusCode(this->responseHeaderString);
+                std::string statusCode = Kit::getStatusCode(this->responseHeaderString[curl.idx]);
                 
                 if (statusCode != "200")
                 {
-                    this->responseHeaderString = "";
-                    this->responseString = "";
+                    this->responseHeaderString[curl.idx] = "";
+                    this->responseString[curl.idx] = "";
                     
                     throw "RESPONSE STATUS IS ERROR!";
                 }
@@ -658,10 +682,10 @@ namespace neo4jDriver
                 Json::Reader reader;
                 
                 //将返回字符串解析为Json对象
-                if (reader.parse(this->responseString, responseJson))
+                if (reader.parse(this->responseString[curl.idx], responseJson))
                 {
-                    this->responseHeaderString = "";
-                    this->responseString = "";
+                    this->responseHeaderString[curl.idx] = "";
+                    this->responseString[curl.idx] = "";
                     
                     //取出其中的错误部分
                     errors = responseJson["errors"];
@@ -712,8 +736,8 @@ namespace neo4jDriver
                 }
                 else
                 {
-                    this->responseHeaderString = "";
-                    this->responseString = "";
+                    this->responseHeaderString[curl.idx] = "";
+                    this->responseString[curl.idx] = "";
                     
                     //解析失败，抛出异常
                     throw "RESPONSE PARSE IS ERROR!";
@@ -1000,7 +1024,8 @@ namespace neo4jDriver
     
     bool Neo4jAPI::replaceNodeByID(unsigned long long int nodeID, Json::Value &properties)
     {
-        if (this->curl)
+        auto curl = this->getCurl();
+        if ((CURL*)curl)
         {
             std::stringstream sstream;
             sstream << nodeID;
@@ -1011,14 +1036,14 @@ namespace neo4jDriver
             std::string httpUrl = "http://" + this->host + ":" + this->port + "/db/data/node/" + nodeIDString + "/properties";
             
             //指定访问点
-            curl_easy_setopt(this->curl, CURLOPT_URL, httpUrl.c_str());
+            curl_easy_setopt(curl, CURLOPT_URL, httpUrl.c_str());
             
             Json::FastWriter writer;
             
             std::string propertiesString = writer.write(properties);
             
             //指定请求方式为PUT
-            curl_easy_setopt(this->curl, CURLOPT_CUSTOMREQUEST, "PUT");
+            curl_easy_setopt(curl, CURLOPT_CUSTOMREQUEST, "PUT");
             
             /*
              * 指定请求方式为PUT，但却将数据放进了POSTFIELDS，这样是稳定的吗？
@@ -1039,10 +1064,10 @@ namespace neo4jDriver
             else
             {
                 //对返回数据的协议状态进行检查
-                std::string statusCode = Kit::getStatusCode(this->responseHeaderString);
+                std::string statusCode = Kit::getStatusCode(this->responseHeaderString[curl.idx]);
                 
-                this->responseHeaderString = "";
-                this->responseString = "";
+                this->responseHeaderString[curl.idx] = "";
+                this->responseString[curl.idx] = "";
                 
                 if (statusCode == "204")
                 {
@@ -1067,7 +1092,8 @@ namespace neo4jDriver
     
     bool Neo4jAPI::insertRelationship(unsigned long long int rootNodeID, unsigned long long int otherNodeID, std::string typeName, Json::Value &properties, Json::Value &relationship)
     {
-        if (this->curl)
+        auto curl = this->getCurl();
+        if ((CURL*)curl)
         {
             std::stringstream sstream;
             sstream << rootNodeID;
@@ -1078,7 +1104,7 @@ namespace neo4jDriver
             std::string httpUrl = "http://" + this->host + ":" + this->port + "/db/data/node/" + rootNodeIDString + "/relationships";
             
             //指定访问点
-            curl_easy_setopt(this->curl, CURLOPT_URL, httpUrl.c_str());
+            curl_easy_setopt(curl, CURLOPT_URL, httpUrl.c_str());
             
             Json::Value root;
             Json::FastWriter writer;
@@ -1095,7 +1121,7 @@ namespace neo4jDriver
             std::string rootString = writer.write(root);
             
             //指定请求方式为POST
-            curl_easy_setopt(this->curl, CURLOPT_POST, 1);
+            curl_easy_setopt(curl, CURLOPT_POST, 1);
             //将Cypher语句填充至POST的数据段中
             curl_easy_setopt(curl, CURLOPT_POSTFIELDS, rootString.c_str());
             
@@ -1111,7 +1137,7 @@ namespace neo4jDriver
             else
             {
                 //对返回数据的协议状态进行检查
-                std::string statusCode = Kit::getStatusCode(this->responseHeaderString);
+                std::string statusCode = Kit::getStatusCode(this->responseHeaderString[curl.idx]);
                 
                 if (statusCode == "201")
                 {
@@ -1120,10 +1146,10 @@ namespace neo4jDriver
                     Json::Value responseJson;
                     Json::Value metaData;
                     
-                    reader.parse(this->responseString, responseJson);
+                    reader.parse(this->responseString[curl.idx], responseJson);
                     
-                    this->responseHeaderString = "";
-                    this->responseString = "";
+                    this->responseHeaderString[curl.idx] = "";
+                    this->responseString[curl.idx] = "";
                     
                     metaData = responseJson["metadata"];
                     
@@ -1135,8 +1161,8 @@ namespace neo4jDriver
                 }
                 else if (statusCode == "400")
                 {
-                    this->responseHeaderString = "";
-                    this->responseString = "";
+                    this->responseHeaderString[curl.idx] = "";
+                    this->responseString[curl.idx] = "";
                     
                     //终端节点未找到
                     relationship = Json::nullValue;
@@ -1145,8 +1171,8 @@ namespace neo4jDriver
                 }
                 else if (statusCode == "404")
                 {
-                    this->responseHeaderString = "";
-                    this->responseString = "";
+                    this->responseHeaderString[curl.idx] = "";
+                    this->responseString[curl.idx] = "";
                     
                     //始端节点未找到
                     relationship = Json::nullValue;
@@ -1155,8 +1181,8 @@ namespace neo4jDriver
                 }
                 else
                 {
-                    this->responseHeaderString = "";
-                    this->responseString = "";
+                    this->responseHeaderString[curl.idx] = "";
+                    this->responseString[curl.idx] = "";
                     
                     //解析失败，抛出异常
                     throw "RESPONSE STATUS IS ERROR!";
@@ -1184,7 +1210,8 @@ namespace neo4jDriver
     
     bool Neo4jAPI::deleteRelationship(unsigned long long int relationshipID)
     {
-        if (this->curl)
+        auto curl = this->getCurl();
+        if ((CURL*)curl)
         {
             std::stringstream sstream;
             sstream << relationshipID;
@@ -1195,9 +1222,9 @@ namespace neo4jDriver
             std::string httpUrl = "http://" + this->host + ":" + this->port + "/db/data/relationship/" + relationshipIDString;
             
             //指定访问点
-            curl_easy_setopt(this->curl, CURLOPT_URL, httpUrl.c_str());
+            curl_easy_setopt(curl, CURLOPT_URL, httpUrl.c_str());
             //指定请求方式为DELETE
-            curl_easy_setopt(this->curl, CURLOPT_CUSTOMREQUEST, "DELETE");
+            curl_easy_setopt(curl, CURLOPT_CUSTOMREQUEST, "DELETE");
             
             //执行DELETE请求
             CURLcode res = curl_easy_perform(curl);
@@ -1211,10 +1238,10 @@ namespace neo4jDriver
             else
             {
                 //对返回数据的协议状态进行检查
-                std::string statusCode = Kit::getStatusCode(this->responseHeaderString);
+                std::string statusCode = Kit::getStatusCode(this->responseHeaderString[curl.idx]);
                 
-                this->responseHeaderString = "";
-                this->responseString = "";
+                this->responseHeaderString[curl.idx] = "";
+                this->responseString[curl.idx] = "";
                 
                 /*
                  * 此处与文档不同，文档中删除关系成功后返回204，但实际返回的却是200
@@ -1292,7 +1319,8 @@ namespace neo4jDriver
     
     bool Neo4jAPI::getRelationship(unsigned long long int relationshipID, Json::Value &relationship)
     {
-        if (this->curl)
+        auto curl = this->getCurl();
+        if ((CURL*)curl)
         {
             std::stringstream sstream;
             sstream << relationshipID;
@@ -1303,7 +1331,7 @@ namespace neo4jDriver
             std::string httpUrl = "http://" + this->host + ":" + this->port + "/db/data/relationship/" + relationshipIDString;
             
             //指定访问点
-            curl_easy_setopt(this->curl, CURLOPT_URL, httpUrl.c_str());
+            curl_easy_setopt(curl, CURLOPT_URL, httpUrl.c_str());
             
             //执行GET请求
             CURLcode res = curl_easy_perform(curl);
@@ -1317,7 +1345,7 @@ namespace neo4jDriver
             else
             {
                 //对返回数据的协议状态进行检查
-                std::string statusCode = Kit::getStatusCode(this->responseHeaderString);
+                std::string statusCode = Kit::getStatusCode(this->responseHeaderString[curl.idx]);
                 
                 if (statusCode == "200")
                 {
@@ -1327,10 +1355,10 @@ namespace neo4jDriver
                     Json::Value responseJson;
                     Json::Value metaData;
                     
-                    reader.parse(this->responseString, responseJson);
+                    reader.parse(this->responseString[curl.idx], responseJson);
                     
-                    this->responseHeaderString = "";
-                    this->responseString = "";
+                    this->responseHeaderString[curl.idx] = "";
+                    this->responseString[curl.idx] = "";
                     
                     metaData = responseJson["metadata"];
                     
@@ -1344,16 +1372,16 @@ namespace neo4jDriver
                 }
                 else if (statusCode == "404")
                 {
-                    this->responseHeaderString = "";
-                    this->responseString = "";
+                    this->responseHeaderString[curl.idx] = "";
+                    this->responseString[curl.idx] = "";
                     
                     //未找到该关系
                     return false;
                 }
                 else
                 {
-                    this->responseHeaderString = "";
-                    this->responseString = "";
+                    this->responseHeaderString[curl.idx] = "";
+                    this->responseString[curl.idx] = "";
                     
                     //解析失败，抛出异常
                     throw "RESPONSE PARSE IS ERROR!";
@@ -1368,7 +1396,8 @@ namespace neo4jDriver
     
     Json::Value Neo4jAPI::getRelationshipsOfOneNode(unsigned long long int nodeID, std::string type)
     {
-        if (this->curl)
+        auto curl = this->getCurl();
+        if ((CURL*)curl)
         {
             if (type != "all" && type != "in" && type != "out")
             {
@@ -1385,10 +1414,10 @@ namespace neo4jDriver
             
             //指定请求方式为GET
             //若不设置该项，默认执行什么方法？？？？
-            curl_easy_setopt(this->curl, CURLOPT_CUSTOMREQUEST, "GET");
+            curl_easy_setopt(curl, CURLOPT_CUSTOMREQUEST, "GET");
             
             //指定访问点
-            curl_easy_setopt(this->curl, CURLOPT_URL, httpUrl.c_str());
+            curl_easy_setopt(curl, CURLOPT_URL, httpUrl.c_str());
             
             //执行GET请求
             CURLcode res = curl_easy_perform(curl);
@@ -1402,7 +1431,7 @@ namespace neo4jDriver
             else
             {
                 //对返回数据的协议状态进行检查
-                std::string statusCode = Kit::getStatusCode(this->responseHeaderString);
+                std::string statusCode = Kit::getStatusCode(this->responseHeaderString[curl.idx]);
                 
                 if (statusCode == "200")
                 {
@@ -1415,10 +1444,10 @@ namespace neo4jDriver
                     
                     Json::Value metadata;
                     
-                    reader.parse(this->responseString, relationshipInfoList);
+                    reader.parse(this->responseString[curl.idx], relationshipInfoList);
                     
-                    this->responseHeaderString = "";
-                    this->responseString = "";
+                    this->responseHeaderString[curl.idx] = "";
+                    this->responseString[curl.idx] = "";
                     
                     for (int i = 0; i < relationshipInfoList.size(); i++)
                     {
@@ -1439,8 +1468,8 @@ namespace neo4jDriver
                 }
                 else
                 {
-                    this->responseHeaderString = "";
-                    this->responseString = "";
+                    this->responseHeaderString[curl.idx] = "";
+                    this->responseString[curl.idx] = "";
                     
                     //解析失败，抛出异常
                     throw "RESPONSE PARSE IS ERROR!";
@@ -1526,12 +1555,12 @@ namespace neo4jDriver
     //            else
     //            {
     //                //对返回数据的协议状态进行检查
-    //                std::string statusCode = Neo4jDatabaseInterfaceKit::getStatusCode(this->responseHeaderString);
+    //                std::string statusCode = Neo4jDatabaseInterfaceKit::getStatusCode(this->responseHeaderString[curl.idx]);
     //
     //                if (statusCode != "200")
     //                {
-    //                    this->responseHeaderString = "";
-    //                    this->responseString = "";
+    //                    this->responseHeaderString[curl.idx] = "";
+    //                    this->responseString[curl.idx] = "";
     //
     //                    throw exception::DatabaseException(5, this->getHost(), this->getPort(),  this->getUser(), this->getPassword(), "");
     //                }
@@ -1544,10 +1573,10 @@ namespace neo4jDriver
     //                Json::Reader reader;
     //
     //                //将返回字符串解析为Json对象
-    //                if (reader.parse(this->responseString, responseJson))
+    //                if (reader.parse(this->responseString[curl.idx], responseJson))
     //                {
-    //                    this->responseHeaderString = "";
-    //                    this->responseString = "";
+    //                    this->responseHeaderString[curl.idx] = "";
+    //                    this->responseString[curl.idx] = "";
     
     //                    //取出其中的错误部分
     //                    errors = responseJson["errors"];
@@ -1598,8 +1627,8 @@ namespace neo4jDriver
     //                }
     //                else
     //                {
-    //                    this->responseHeaderString = "";
-    //                    this->responseString = "";
+    //                    this->responseHeaderString[curl.idx] = "";
+    //                    this->responseString[curl.idx] = "";
     //
     //                    //解析失败，抛出异常
     //                    throw exception::DatabaseException(40, this->getHost(), this->getPort(),  this->getUser(), this->getPassword(), "");
@@ -1655,7 +1684,8 @@ namespace neo4jDriver
     
     bool Neo4jAPI::replaceRelationshipProperties(unsigned long long int relationshipID, Json::Value &properties)
     {
-        if (this->curl)
+        auto curl = this->getCurl();
+        if ((CURL*)curl)
         {
             std::stringstream sstream;
             sstream << relationshipID;
@@ -1666,14 +1696,14 @@ namespace neo4jDriver
             std::string httpUrl = "http://" + this->host + ":" + this->port + "/db/data/relationship/" + relationshipIDString + "/properties";
             
             //指定访问点
-            curl_easy_setopt(this->curl, CURLOPT_URL, httpUrl.c_str());
+            curl_easy_setopt(curl, CURLOPT_URL, httpUrl.c_str());
             
             Json::FastWriter writer;
             
             std::string propertiesString = writer.write(properties);
             
             //指定请求方式为PUT
-            curl_easy_setopt(this->curl, CURLOPT_CUSTOMREQUEST, "PUT");
+            curl_easy_setopt(curl, CURLOPT_CUSTOMREQUEST, "PUT");
             
             /*
              * 指定请求方式为PUT，但却将数据放进了POSTFIELDS，这样是稳定的吗？
@@ -1686,7 +1716,7 @@ namespace neo4jDriver
             CURLcode res = curl_easy_perform(curl);
             
             //恢复请求方式
-            curl_easy_setopt(this->curl, CURLOPT_CUSTOMREQUEST, NULL);
+            curl_easy_setopt(curl, CURLOPT_CUSTOMREQUEST, NULL);
             
             //根据执行结果返回执行结果或抛出异常
             if (res != 0)
@@ -1697,10 +1727,10 @@ namespace neo4jDriver
             else
             {
                 //对返回数据的协议状态进行检查
-                std::string statusCode = Kit::getStatusCode(this->responseHeaderString);
+                std::string statusCode = Kit::getStatusCode(this->responseHeaderString[curl.idx]);
                 
-                this->responseHeaderString = "";
-                this->responseString = "";
+                this->responseHeaderString[curl.idx] = "";
+                this->responseString[curl.idx] = "";
                 
                 if (statusCode == "204")
                 {
@@ -1731,11 +1761,18 @@ namespace neo4jDriver
             curl_slist_free_all(this->headers);
             this->headers = NULL;
         }
-        if (this->curl)
-        {
-            curl_easy_cleanup(this->curl);
-            this->curl = NULL;
-        }
+        for(auto &i:curl)
+            if (i!=NULL)
+            {
+                curl_easy_cleanup(i);
+                i = NULL;
+            }
+        for(auto &i:curlStatus)
+            if (i!=NULL)
+            {
+                delete i;
+                i = NULL;
+            }
         
         //删除该数据库接口占用的数据库驱动
         this->database->deleteNeo4j();
@@ -1802,4 +1839,17 @@ namespace neo4jDriver
         //返回本次接收到的数据的长度
         return responseDataLength;
     };
+
+    autocurl Neo4jAPI::getCurl()
+    {
+        for(int idx=rand()%this->curl.size();;idx=(idx+1)%this->curl.size())
+        {
+            bool bo=false;
+            if(curlStatus[idx]->compare_exchange_weak(bo,true))
+            {
+                return autocurl(this->curl[idx],curlStatus[idx],idx);
+            }
+        }
+        return autocurl(NULL,NULL,-1);
+    }
 }
